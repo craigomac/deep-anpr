@@ -113,12 +113,34 @@ def mpgen(f):
 
 @mpgen
 def read_batches(batch_size):
+    g = gen.generate_ims()
     def gen_vecs():
-        for im, c, p in gen.generate_ims(batch_size):
+        for im, c, p in itertools.islice(g, batch_size):
             yield im, code_to_vec(p, c)
 
     while True:
         yield unzip(gen_vecs())
+
+
+def get_loss(y, y_):
+    # Calculate the loss from digits being incorrect.  Don't count loss from
+    # digits that are in non-present plates.
+    digits_loss = tf.nn.softmax_cross_entropy_with_logits(
+                                          tf.reshape(y[:, 1:],
+                                                     [-1, len(common.CHARS)]),
+                                          tf.reshape(y_[:, 1:],
+                                                     [-1, len(common.CHARS)]))
+    digits_loss = tf.reshape(digits_loss, [-1, 7])
+    digits_loss = tf.reduce_sum(digits_loss, 1)
+    digits_loss *= (y_[:, 0] != 0)
+    digits_loss = tf.reduce_sum(digits_loss)
+
+    # Calculate the loss from presence indicator being wrong.
+    presence_loss = tf.nn.sigmoid_cross_entropy_with_logits(
+                                                          y[:, :1], y_[:, :1])
+    presence_loss = 7 * tf.reduce_sum(presence_loss)
+
+    return digits_loss, presence_loss, digits_loss + presence_loss
 
 
 def train(learn_rate, report_steps, batch_size, initial_weights=None):
@@ -149,17 +171,8 @@ def train(learn_rate, report_steps, batch_size, initial_weights=None):
 
     y_ = tf.placeholder(tf.float32, [None, 7 * len(common.CHARS) + 1])
 
-    digits_loss = tf.nn.softmax_cross_entropy_with_logits(
-                                          tf.reshape(y[:, 1:],
-                                                     [-1, len(common.CHARS)]),
-                                          tf.reshape(y_[:, 1:],
-                                                     [-1, len(common.CHARS)]))
-    digits_loss = tf.reduce_sum(digits_loss)
-    presence_loss = 10. * tf.nn.sigmoid_cross_entropy_with_logits(
-                                                          y[:, :1], y_[:, :1])
-    presence_loss = tf.reduce_sum(presence_loss)
-    cross_entropy = digits_loss + presence_loss
-    train_step = tf.train.AdamOptimizer(learn_rate).minimize(cross_entropy)
+    digits_loss, presence_loss, loss = get_loss(y, y_)
+    train_step = tf.train.AdamOptimizer(learn_rate).minimize(loss)
 
     best = tf.argmax(tf.reshape(y[:, 1:], [-1, 7, len(common.CHARS)]), 2)
     correct = tf.argmax(tf.reshape(y_[:, 1:], [-1, 7, len(common.CHARS)]), 2)
@@ -180,7 +193,7 @@ def train(learn_rate, report_steps, batch_size, initial_weights=None):
                       y_[:, 0],
                       digits_loss,
                       presence_loss,
-                      cross_entropy],
+                      loss],
                      feed_dict={x: test_xs, y_: test_ys})
         num_correct = numpy.sum(
                         numpy.logical_or(
